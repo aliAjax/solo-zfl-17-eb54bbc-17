@@ -6,7 +6,7 @@
   "scripts": {
     "start": "python3 -m http.server 8137 --bind 127.0.0.1",
     "test": "playwright test",
-    "test:core": "node smoke-core.js && node smoke-merge.js"
+    "test:core": "node smoke-core.js && node smoke-merge.js && node smoke-same-op.js"
   },
   "keywords": [],
   "author": "",

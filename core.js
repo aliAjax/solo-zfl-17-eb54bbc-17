@@ -468,12 +468,73 @@
   }
 
   function mergeHistory(localH, inH) {
+    // 先按操作 id 去重（正常实时合并的同一次操作）
     const byOp = new Map(localH.map((h) => [h.opId || h.id, h]));
     for (const h of inH) {
       const k = h.opId || h.id;
       if (!byOp.has(k)) byOp.set(k, h);
     }
-    return [...byOp.values()].sort((a, b) => new Date(a.ts) - new Date(b.ts));
+    // 再按操作语义去重：两个离线页各自执行完全相同的动作（动作+详情+操作人相同），
+    // opId 不同但其实是同一次操作，只保留一条（取最早时间）。
+    const bySem = new Map();
+    for (const h of byOp.values()) {
+      const key = [h.action, h.detail, h.actorId || ""].join("|");
+      const exist = bySem.get(key);
+      if (!exist || new Date(h.ts) < new Date(exist.ts)) bySem.set(key, h);
+    }
+    return [...bySem.values()].sort((a, b) => new Date(a.ts) - new Date(b.ts));
+  }
+
+  // 两个离线页对同一案例执行完全相同的操作时，预留/流水/历史各自生成了不同 id，
+  // 按 id 并集会把“同一次操作”算两遍。下面按“操作语义”再做一次幂等去重。
+  function reservationSemKey(r, caseIdRemap) {
+    const caseId = caseIdRemap?.get(r.caseId) || r.caseId;
+    return [caseId, r.itemId, r.qty, r.status].join("|");
+  }
+
+  function dedupeReservations(list, caseIdRemap, logs) {
+    const byKey = new Map();
+    let absorbed = 0;
+    for (const r of list) {
+      const key = reservationSemKey(r, caseIdRemap);
+      const remapped = caseIdRemap?.has(r.caseId) ? { ...r, caseId: caseIdRemap.get(r.caseId) } : r;
+      if (byKey.has(key)) {
+        absorbed++;
+        // 合并两页对同一预留可能产生的状态推进（如一页已消耗、另一页仍预留）
+        const exist = byKey.get(key);
+        if (exist.status === "reserved" && remapped.status === "consumed") byKey.set(key, remapped);
+        continue;
+      }
+      byKey.set(key, remapped);
+    }
+    if (absorbed) logs.push(`两页对同一案例的相同预留只吸收一次，跳过 ${absorbed} 条重复预留。`);
+    return [...byKey.values()];
+  }
+
+  function movementSemKey(m, caseIdRemap) {
+    const caseId = caseIdRemap?.get(m.caseId) || m.caseId;
+    return [caseId, m.itemId, m.delta, m.kind].join("|");
+  }
+
+  function dedupeMovements(list, caseIdRemap, logs) {
+    const byKey = new Map();
+    let absorbed = 0;
+    for (const m of list) {
+      // 仅对案例相关的流水做语义去重；全局操作（如入库 restock-base，caseId 为空）保留
+      if (!m.caseId) {
+        byKey.set(m.id, m);
+        continue;
+      }
+      const key = movementSemKey(m, caseIdRemap);
+      if (byKey.has(key)) {
+        absorbed++;
+        continue;
+      }
+      const remapped = caseIdRemap?.has(m.caseId) ? { ...m, caseId: caseIdRemap.get(m.caseId) } : m;
+      byKey.set(key, remapped);
+    }
+    if (absorbed) logs.push(`两页对同一案例的相同库存流水只吸收一次，跳过 ${absorbed} 条重复流水。`);
+    return [...byKey.values()].sort((a, b) => new Date(a.ts) - new Date(b.ts));
   }
 
   function mergeSegmentCodes(a, b) {
@@ -578,13 +639,13 @@
       base.segments, local.segments, incoming.segments, doc, conflicts, decide, logs
     );
 
-    // 流水账与预留按 id 并集（幂等）
+    // 流水账与预留先按 id 并集；案例合并完成后还要按“操作语义”对同案同操作去重
     const movMap = new Map();
     for (const m of [...(local.stockMovements || []), ...(incoming.stockMovements || [])]) {
       if (!movMap.has(m.id)) movMap.set(m.id, m);
     }
-    merged.stockMovements = [...movMap.values()].sort((a, b) => new Date(a.ts) - new Date(b.ts));
-    merged.reservations = mergeRecordCollection(
+    const rawMovements = [...movMap.values()];
+    const rawReservations = mergeRecordCollection(
       { key: "reservations", entityName: "预留单", nameOf: (r) => r.id, scalars: RESERVATION_SCALARS },
       base.reservations, local.reservations, incoming.reservations, doc, conflicts, decide, logs
     );
@@ -661,12 +722,15 @@
     // 重复案例去重后：把被并入案例的预留/流水重挂到幸存案例（同一编号两页各预留时合计计数，
     // 才能真实暴露库存超量）；其余悬空引用才丢弃。
     const liveCaseIds = new Set(merged.cases.map((c) => c.id));
-    merged.reservations = merged.reservations
+    const remappedReservations = rawReservations
       .map((r) => (caseIdRemap.has(r.caseId) ? { ...r, caseId: caseIdRemap.get(r.caseId) } : r))
       .filter((r) => liveCaseIds.has(r.caseId));
-    merged.stockMovements = merged.stockMovements
+    const remappedMovements = rawMovements
       .map((m) => (caseIdRemap.has(m.caseId) ? { ...m, caseId: caseIdRemap.get(m.caseId) } : m))
       .filter((m) => !m.caseId || liveCaseIds.has(m.caseId));
+    // 关键：同一案例、同一物料、同一数量、同一状态的预留视为“同一次操作”，只吸收一次
+    merged.reservations = dedupeReservations(remappedReservations, caseIdRemap, logs);
+    merged.stockMovements = dedupeMovements(remappedMovements, caseIdRemap, logs);
     return { merged, conflicts, logs };
   }
 
@@ -1176,8 +1240,7 @@
           status: "reserved",
           ts: ctx.ts
         });
-      }
-      incident.status = "repairing";
+      }      incident.status = "repairing";
       appendHistory(
         doc,
         incident,
