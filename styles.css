@@ -981,6 +981,41 @@ label {
   color: #3d444a;
 }
 
+.violation-block {
+  display: none;
+}
+
+.violation-block.has-violations {
+  display: block;
+  border: 1px solid rgba(181, 77, 72, 0.55);
+  background: rgba(181, 77, 72, 0.07);
+  border-radius: 8px;
+  padding: 11px 13px;
+}
+
+.violation-title {
+  color: var(--red);
+  margin-bottom: 6px;
+}
+
+.violation-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 7px;
+}
+
+.violation-item {
+  font-size: 13px;
+  line-height: 1.5;
+  color: #7d332f;
+  background: #fff6f4;
+  border: 1px solid rgba(181, 77, 72, 0.3);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
 .conflict-list {
   display: grid;
   gap: 10px;

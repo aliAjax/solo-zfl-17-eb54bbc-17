@@ -595,6 +595,8 @@
     const inCases = new Map((incoming.cases || []).map((c) => [c.id, c]));
     const usedIncoming = new Set();
     const outCases = [];
+    // 重复案例合并后，被并入案例 id → 幸存案例 id，用于把其预留/流水重挂过去
+    const caseIdRemap = new Map();
 
     for (const lc of local.cases || []) {
       if (inCases.has(lc.id)) {
@@ -639,6 +641,10 @@
         if (survivor === "incoming") {
           mergedCase.id = dup.id;
           mergedCase.code = dup.code;
+          // 本页那份被并入：它的预留/流水重挂到离线页幸存 id
+          caseIdRemap.set(lc.id, dup.id);
+        } else {
+          caseIdRemap.set(dup.id, lc.id);
         }
         outCases.push(mergedCase);
         continue;
@@ -652,7 +658,79 @@
       }
     }
     merged.cases = outCases;
+    // 重复案例去重后：把被并入案例的预留/流水重挂到幸存案例（同一编号两页各预留时合计计数，
+    // 才能真实暴露库存超量）；其余悬空引用才丢弃。
+    const liveCaseIds = new Set(merged.cases.map((c) => c.id));
+    merged.reservations = merged.reservations
+      .map((r) => (caseIdRemap.has(r.caseId) ? { ...r, caseId: caseIdRemap.get(r.caseId) } : r))
+      .filter((r) => liveCaseIds.has(r.caseId));
+    merged.stockMovements = merged.stockMovements
+      .map((m) => (caseIdRemap.has(m.caseId) ? { ...m, caseId: caseIdRemap.get(m.caseId) } : m))
+      .filter((m) => !m.caseId || liveCaseIds.has(m.caseId));
     return { merged, conflicts, logs };
+  }
+
+  // ---------- 合并结果的资源/库存重校验 ----------
+  // 合并只合并数据，但两个离线页可能各自合法、合在一起却互相冲突：
+  // 同一技师/设备被重叠时段双派工，或各单预留量之和超过库存。
+  // 任一项命中都必须阻止整批写入，并把每条冲突明确列给操作者。
+  function validateMergedDoc(doc) {
+    const violations = [];
+
+    const active = doc.cases.filter((c) => c.status !== "closed" && c.booking);
+    for (let i = 0; i < active.length; i++) {
+      for (let j = i + 1; j < active.length; j++) {
+        const a = active[i];
+        const b = active[j];
+        const s1 = toTime(a.booking.start);
+        const e1 = toTime(a.booking.end);
+        const s2 = toTime(b.booking.start);
+        const e2 = toTime(b.booking.end);
+        if (![s1, e1, s2, e2].every(Number.isFinite)) continue;
+        if (!overlaps(s1, e1, s2, e2)) continue;
+        const win = `${a.booking.start.replace("T", " ")} ~ ${a.booking.end.replace("T", " ")}`;
+        if (a.booking.technicianId === b.booking.technicianId) {
+          const name = personById(doc, a.booking.technicianId)?.name || "该技师";
+          violations.push({
+            kind: "technician-overlap",
+            caseIds: [a.id, b.id],
+            message: `技师重叠：${name} 在 ${win} 被两个案例同时占用 —— ${a.code} 与 ${b.code}。请在任一页面改派技师或错开时段后重新合并。`
+          });
+        }
+        if (a.booking.deviceId === b.booking.deviceId) {
+          const name = deviceById(doc, a.booking.deviceId)?.name || "该设备";
+          violations.push({
+            kind: "device-overlap",
+            caseIds: [a.id, b.id],
+            message: `设备重叠：${name} 在 ${win} 被两个案例同时占用 —— ${a.code} 与 ${b.code}。请在任一页面更换设备或错开时段后重新合并。`
+          });
+        }
+      }
+    }
+
+    for (const item of doc.inventoryItems) {
+      const stock = stockOf(doc, item.id);
+      const reserved = doc.reservations
+        .filter((r) => r.itemId === item.id && r.status === "reserved")
+        .reduce((s, r) => s + r.qty, 0);
+      if (reserved > stock) {
+        const cases = [
+          ...new Set(
+            doc.reservations
+              .filter((r) => r.itemId === item.id && r.status === "reserved")
+              .map((r) => caseById(doc, r.caseId)?.code)
+              .filter(Boolean)
+          )
+        ];
+        violations.push({
+          kind: "stock-overrun",
+          itemId: item.id,
+          message: `库存超量：${item.name} 合并后共预留 ${reserved}${item.unit}，但库存仅 ${stock}${item.unit}（缺口 ${reserved - stock}${item.unit}），涉及案例 ${cases.join("、")}。请先取消部分预留或补足库存后重新合并。`
+        });
+      }
+    }
+
+    return violations;
   }
 
   const SESSION_KEY = "zfl17-film-rescue-session-id";
@@ -807,13 +885,18 @@
       return true;
     }
 
-    // 接收其他标签页 / 离线快照文档：快进、忽略或三方合并
+    // 接收其他标签页 / 离线快照文档：快进、忽略、合并或被资源/库存校验阻止
     function ingest(incomingDoc) {
       const local = envelope.doc;
       if (clocksEqual(local.clock, incomingDoc.clock)) {
         return { status: "identical" };
       }
       if (clockDominates(incomingDoc.clock, local.clock)) {
+        // 即使是纯快进（远端是本机数据的后代），也重校验一次，防止绕过合并路径的脏状态落盘
+        const violations = validateMergedDoc(incomingDoc);
+        if (violations.length) {
+          return { status: "blocked", violations, incomingDoc };
+        }
         const old = envelope;
         envelope = { ...envelope, doc: clone(incomingDoc), base: clone(incomingDoc) };
         try {
@@ -828,16 +911,26 @@
       if (clockDominates(local.clock, incomingDoc.clock)) {
         return { status: "behind" };
       }
+      // 分叉：先按默认裁决（一律本页优先）算出合并结果，用于资源/库存预校验
       const plan = mergeDocuments(envelope.base, local, incomingDoc);
-      if (!plan.conflicts.length) {
+      const preview = mergeDocuments(envelope.base, local, incomingDoc, {}).merged;
+      const violations = validateMergedDoc(preview);
+      if (!plan.conflicts.length && !violations.length) {
         return commitMerge(incomingDoc, {});
       }
-      return { status: "conflict", incomingDoc, conflicts: plan.conflicts, logs: plan.logs };
+      return { status: violations.length && !plan.conflicts.length ? "blocked" : "conflict", incomingDoc, conflicts: plan.conflicts, logs: plan.logs, violations };
     }
 
-    // 冲突全部由 UI 逐项裁决后，携带 decisions 提交
+    // 冲突由 UI 逐项裁决后携带 decisions 提交；写入前重校验技师/设备/库存
     function commitMerge(incomingDoc, decisions) {
       const { merged, conflicts, logs } = mergeDocuments(envelope.base, envelope.doc, incomingDoc, decisions);
+      const violations = validateMergedDoc(merged);
+      if (violations.length) {
+        // 不触碰 envelope，不写盘 —— 整批阻止
+        const err = new AppError("MERGE_VIOLATIONS", "合并被资源/库存约束阻止，请先处理下列冲突后重新合并。");
+        err.violations = violations;
+        throw err;
+      }
       const draft = clone(merged);
       draft.clock = mergeClocks(envelope.doc.clock, incomingDoc.clock);
       // 再 bump 一次，保证合并提交对所有端都是新后代
@@ -864,6 +957,12 @@
     // 由 UI 保存待裁决计划时调用（携带外来文档与逐项裁决）
     function resolveConflict(incomingDoc, decisions) {
       return commitMerge(incomingDoc, decisions);
+    }
+
+    // 供 UI 在不写入的情况下预览某次裁决的资源/库存违规
+    function previewMergeViolations(incomingDoc, decisions) {
+      const { merged } = mergeDocuments(envelope.base, envelope.doc, incomingDoc, decisions);
+      return validateMergedDoc(merged);
     }
 
     function exportSnapshot() {
@@ -915,6 +1014,7 @@
       redo,
       ingest,
       resolveConflict,
+      previewMergeViolations,
       exportSnapshot,
       exportIncidentPackage,
       adapter,
@@ -1231,6 +1331,7 @@
     createStore,
     createAdapter,
     mergeDocuments,
+    validateMergedDoc,
     helpers: {
       uid,
       clone,

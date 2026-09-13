@@ -832,8 +832,12 @@
     else if (result.status === "behind") toast(`${sourceName} 是更旧的版本，已忽略。`, "warn");
     else if (result.status === "fastforward" || result.status === "merged") {
       toast(`${sourceName}已无冲突合并进本页。`, "ok", 5000);
+    } else if (result.status === "blocked") {
+      // 无字段冲突、但合并结果违反技师/设备/库存约束：整批阻止，不写入
+      mergePlan = { incomingDoc: doc, conflicts: [], violations: result.violations, logs: [], sourceName };
+      openMergeModal();
     } else if (result.status === "conflict") {
-      mergePlan = { incomingDoc: doc, conflicts: result.conflicts, logs: result.logs, sourceName };
+      mergePlan = { incomingDoc: doc, conflicts: result.conflicts, violations: result.violations || [], logs: result.logs, sourceName };
       openMergeModal();
     }
   }
@@ -864,27 +868,81 @@
       </div>`;
   }
 
+  function violationRowHtml(v) {
+    const icon =
+      v.kind === "stock-overrun" ? "📦" : v.kind === "technician-overlap" ? "👤" : "🎛️";
+    return `<li class="violation-item">${icon} ${esc(v.message)}</li>`;
+  }
+
   function openMergeModal() {
-    const { conflicts, logs, sourceName } = mergePlan;
+    const { conflicts, violations, logs, sourceName } = mergePlan;
     $("#mergeBody").innerHTML = `
       <p class="muted">检测到 ${conflicts.length} 项同一案例/记录的并发修改，请逐项裁决；完全重复的登记与证据已自动只吸收一次。</p>
       ${logs.length ? `<ul class="merge-logs">${logs.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}
-      <div class="conflict-list">${conflicts.map((cf, i) => conflictRowHtml(cf, i)).join("")}</div>`;
+      <div class="conflict-list">${conflicts.map((cf, i) => conflictRowHtml(cf, i)).join("")}</div>
+      <div class="violation-block ${violations.length ? "has-violations" : ""}" id="mergeViolations">
+        ${violations.length ? renderViolations(violations) : ""}
+      </div>`;
     $("#mergeMask").classList.remove("hidden");
+    updateMergeCommitState(violations.length > 0);
   }
 
-  function commitMerge() {
+  function renderViolations(list) {
+    return `
+      <h3 class="violation-title">合并被资源/库存约束阻止（${list.length}）</h3>
+      <p class="muted">以下冲突由两个页面各自合法、合在一起造成；请在任一页面调整派工/预留后重新合并，当前不会写入任何数据。</p>
+      <ul class="violation-list">${list.map(violationRowHtml).join("")}</ul>`;
+  }
+
+  function updateMergeCommitState(blocked) {
+    const btn = $("#mergeCommit");
+    btn.disabled = blocked;
+    btn.textContent = blocked ? "存在资源/库存冲突，无法合并" : "按裁决合并";
+    btn.classList.toggle("primary", !blocked);
+  }
+
+  // 裁决改变后，不写入地重新预览合并结果的资源/库存违规
+  function refreshMergeViolations() {
+    if (!mergePlan) return;
+    const decisions = collectMergeDecisions();
+    let violations = [];
+    try {
+      violations = store.previewMergeViolations(mergePlan.incomingDoc, decisions);
+    } catch {
+      violations = mergePlan.violations || [];
+    }
+    mergePlan.violations = violations;
+    const box = $("#mergeViolations");
+    box.classList.toggle("has-violations", violations.length > 0);
+    box.innerHTML = violations.length ? renderViolations(violations) : "";
+    updateMergeCommitState(violations.length > 0);
+  }
+
+  function collectMergeDecisions() {
     const decisions = {};
     $$(".conflict-row", $("#mergeBody")).forEach((row, idx) => {
       const checked = $(`input[name=cf-${idx}]:checked`, $("#mergeBody"));
       decisions[row.dataset.key] = checked?.value || "local";
     });
+    return decisions;
+  }
+
+  function commitMerge() {
+    const decisions = collectMergeDecisions();
     try {
       store.resolveConflict(mergePlan.incomingDoc, decisions);
       toast("合并完成，冲突已按逐项裁决落盘。", "ok", 5000);
       $("#mergeMask").classList.add("hidden");
       mergePlan = null;
     } catch (e) {
+      // 核心层兜底：若仍有资源/库存违规，留在弹窗内并列出，阻止写入
+      if (e.violations) {
+        mergePlan.violations = e.violations;
+        const box = $("#mergeViolations");
+        box.classList.add("has-violations");
+        box.innerHTML = renderViolations(e.violations);
+        updateMergeCommitState(true);
+      }
       toast(e.message, "error", 7000);
     }
   }
@@ -1078,6 +1136,11 @@
         const radio = $(`input[name=cf-${idx}][value=${val}]`, $("#mergeBody"));
         if (radio) radio.checked = true;
       });
+      refreshMergeViolations();
+    });
+    // 任一字段裁决改变后，实时重算资源/库存违规并更新提交按钮
+    $("#mergeBody").addEventListener("change", (ev) => {
+      if (ev.target.matches("input[type=radio]")) refreshMergeViolations();
     });
   }
 
