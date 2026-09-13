@@ -1,0 +1,18 @@
+{
+  "name": "film-rescue-desk",
+  "version": "2.0.0",
+  "description": "胶片抢救任务指挥台：多卷片段事故登记、派工/修复/复检/关闭流转、资源与库存预留、离线标签页合并、撤销重做与事故包导出。",
+  "private": true,
+  "scripts": {
+    "start": "python3 -m http.server 8137 --bind 127.0.0.1",
+    "test": "playwright test",
+    "test:core": "node smoke-core.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.52.0",
+    "playwright": "^1.52.0"
+  }
+}

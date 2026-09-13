@@ -3,114 +3,247 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>胶片分镜条核对台</title>
+    <title>胶片抢救任务指挥台</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="shell">
-      <header class="hero">
-        <div>
-          <p class="eyebrow">纸质放映胶片整理</p>
-          <h1>胶片分镜条核对台</h1>
+      <header class="topbar">
+        <div class="brand">
+          <p class="eyebrow">纸质放映胶片整理 · RESCUE COMMAND</p>
+          <h1>胶片抢救任务指挥台</h1>
         </div>
-        <div class="hero-stats">
-          <div>
-            <span>总时长</span>
-            <strong id="totalDuration">0:00</strong>
-          </div>
-          <div>
-            <span>破损片段</span>
-            <strong id="damageCount">0</strong>
-          </div>
-          <div>
-            <span>片段数</span>
-            <strong id="segmentCount">0</strong>
-          </div>
+        <div class="top-controls">
+          <label class="actor-pick">
+            当前操作员
+            <select id="actorSelect" title="以谁的身份执行操作（复检人与修复人不能为同一人）"></select>
+          </label>
+          <button id="undoBtn" title="撤销 (Ctrl+Z)">↶ 撤销</button>
+          <button id="redoBtn" title="重做 (Ctrl+Y)">↷ 重做</button>
+          <button id="exportSnapshotBtn" title="导出离线快照，供另一个标签页合并">⇪ 离线快照</button>
+          <button id="importSnapshotBtn" title="合并另一个离线标签页的快照">⇩ 合并页面</button>
+          <input id="importSnapshotFile" type="file" accept="application/json,.json" hidden />
+          <button id="exportPackageBtn" class="primary">导出事故包</button>
+          <button id="failNextBtn" title="故障注入：让下一次保存失败（用于验证整单回滚）">⚙ 模拟下次保存失败</button>
         </div>
       </header>
 
-      <section class="toolbar">
-        <label>
-          胶片卷
-          <input id="reelTitle" type="text" placeholder="例：春日试映A卷" />
-        </label>
-        <label>
-          颜色偏移
-          <select id="colorFilter">
-            <option value="all">全部</option>
-            <option value="正常">正常</option>
-            <option value="偏红">偏红</option>
-            <option value="偏青">偏青</option>
-            <option value="偏黄">偏黄</option>
-            <option value="褪色">褪色</option>
-          </select>
-        </label>
-        <label>
-          搜索
-          <input id="searchInput" type="search" placeholder="片段编号或备注" />
-        </label>
-        <button id="exportBtn">导出清单</button>
+      <section class="stats-row" id="statsRow"></section>
+
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="board" role="tab">抢救看板</button>
+        <button class="tab" data-tab="check" role="tab">片段核对台</button>
+        <button class="tab" data-tab="resources" role="tab">资源与库存</button>
+      </nav>
+
+      <!-- ============ 抢救看板 ============ -->
+      <section class="view" id="view-board">
+        <div class="board-layout">
+          <aside class="panel register-panel">
+            <h2>登记事故案例</h2>
+            <form id="caseForm" class="case-form">
+              <div class="two-col">
+                <label>案例编号（留空自动）
+                  <input id="caseCode" placeholder="IR-2026-002" />
+                </label>
+                <label>严重度
+                  <select id="caseSeverity"></select>
+                </label>
+              </div>
+              <label>事故标题
+                <input id="caseTitle" required placeholder="例：A-012 接片松动断裂" />
+              </label>
+              <div class="two-col">
+                <label>所属胶片卷
+                  <select id="caseReel"></select>
+                </label>
+                <label>事故类型
+                  <select id="caseType"></select>
+                </label>
+              </div>
+              <label>责任人
+                <select id="caseResponsible"></select>
+              </label>
+              <fieldset class="seg-pick">
+                <legend>涉及片段（可多选）</legend>
+                <div id="caseSegments" class="checkbox-grid"></div>
+              </fieldset>
+              <label>事故描述
+                <textarea id="caseDesc" rows="3" placeholder="损坏位置、范围、初判原因"></textarea>
+              </label>
+              <div class="two-col">
+                <label>文字证据
+                  <textarea id="caseEvidenceNote" rows="2" placeholder="初检记录（可后补图片）"></textarea>
+                </label>
+                <label>影像证据
+                  <input id="caseEvidenceFile" type="file" accept="image/*" />
+                </label>
+              </div>
+              <label class="inline-check">
+                <input id="caseDamageConfirmed" type="checkbox" />
+                损坏情况已经责任人现场确认
+              </label>
+              <button class="primary" type="submit">登记案例</button>
+            </form>
+          </aside>
+
+          <div class="board-main">
+            <div class="board-filters">
+              <input id="boardSearch" type="search" placeholder="搜索案例编号 / 标题 / 片段" />
+              <select id="boardSeverityFilter">
+                <option value="all">全部严重度</option>
+              </select>
+              <select id="boardReelFilter">
+                <option value="all">全部胶片卷</option>
+              </select>
+              <span id="boardCount" class="board-count"></span>
+            </div>
+            <div class="kanban" id="kanban"></div>
+          </div>
+        </div>
       </section>
 
-      <section class="layout">
-        <aside class="panel">
-          <h2>录入片段</h2>
-          <form id="segmentForm" class="segment-form">
-            <label>
-              片段编号
-              <input id="codeInput" required placeholder="A-014" />
-            </label>
-            <label>
-              时长秒数
-              <input id="durationInput" required type="number" min="1" value="12" />
-            </label>
-            <label>
-              颜色偏移
-              <select id="shiftInput">
-                <option value="正常">正常</option>
-                <option value="偏红">偏红</option>
-                <option value="偏青">偏青</option>
-                <option value="偏黄">偏黄</option>
-                <option value="褪色">褪色</option>
-              </select>
-            </label>
-            <label>
-              破损情况
-              <select id="damageInput">
-                <option value="完好">完好</option>
-                <option value="轻微划痕">轻微划痕</option>
-                <option value="齿孔破损">齿孔破损</option>
-                <option value="接片松动">接片松动</option>
-                <option value="需跳过">需跳过</option>
-              </select>
-            </label>
-            <label>
-              缩略图
-              <input id="thumbInput" type="file" accept="image/*" />
-            </label>
-            <label>
-              备注
-              <textarea id="noteInput" rows="4" placeholder="试映前要留意的画面、接片或声音点"></textarea>
-            </label>
-            <button class="primary" type="submit">加入放映清单</button>
-          </form>
-        </aside>
-
-        <section class="panel list-panel">
-          <div class="panel-head">
-            <h2>放映顺序</h2>
-            <span>拖拽片段调整顺序</span>
-          </div>
-          <div id="segmentList" class="segment-list"></div>
+      <!-- ============ 片段核对台（原有能力） ============ -->
+      <section class="view hidden" id="view-check">
+        <section class="toolbar">
+          <label>
+            胶片卷标题
+            <input id="reelTitle" type="text" placeholder="例：春日试映A卷" />
+          </label>
+          <label>
+            颜色偏移
+            <select id="colorFilter">
+              <option value="all">全部</option>
+              <option value="正常">正常</option>
+              <option value="偏红">偏红</option>
+              <option value="偏青">偏青</option>
+              <option value="偏黄">偏黄</option>
+              <option value="褪色">褪色</option>
+            </select>
+          </label>
+          <label>
+            搜索
+            <input id="searchInput" type="search" placeholder="片段编号或备注" />
+          </label>
+          <button id="exportBtn">导出片段清单</button>
         </section>
 
-        <aside class="panel warning-panel">
-          <h2>试映前核对</h2>
-          <div id="warningList" class="warning-list"></div>
-        </aside>
+        <section class="layout">
+          <aside class="panel">
+            <h2>录入片段</h2>
+            <form id="segmentForm" class="segment-form">
+              <label>所属胶片卷
+                <select id="segmentReel"></select>
+              </label>
+              <label>
+                片段编号
+                <input id="codeInput" required placeholder="A-014" />
+              </label>
+              <label>
+                时长秒数
+                <input id="durationInput" required type="number" min="1" value="12" />
+              </label>
+              <label>
+                颜色偏移
+                <select id="shiftInput">
+                  <option value="正常">正常</option>
+                  <option value="偏红">偏红</option>
+                  <option value="偏青">偏青</option>
+                  <option value="偏黄">偏黄</option>
+                  <option value="褪色">褪色</option>
+                </select>
+              </label>
+              <label>
+                破损情况
+                <select id="damageInput">
+                  <option value="完好">完好</option>
+                  <option value="轻微划痕">轻微划痕</option>
+                  <option value="齿孔破损">齿孔破损</option>
+                  <option value="接片松动">接片松动</option>
+                  <option value="霉斑">霉斑</option>
+                  <option value="需跳过">需跳过</option>
+                </select>
+              </label>
+              <label>
+                缩略图
+                <input id="thumbInput" type="file" accept="image/*" />
+              </label>
+              <label>
+                备注
+                <textarea id="noteInput" rows="4" placeholder="试映前要留意的画面、接片或声音点"></textarea>
+              </label>
+              <button class="primary" type="submit">加入放映清单</button>
+            </form>
+          </aside>
+
+          <section class="panel list-panel">
+            <div class="panel-head">
+              <h2>放映顺序</h2>
+              <span>拖拽片段调整顺序</span>
+            </div>
+            <div id="segmentList" class="segment-list"></div>
+          </section>
+
+          <aside class="panel warning-panel">
+            <h2>试映前核对</h2>
+            <div id="warningList" class="warning-list"></div>
+          </aside>
+        </section>
+      </section>
+
+      <!-- ============ 资源与库存 ============ -->
+      <section class="view hidden" id="view-resources">
+        <div class="resources-grid">
+          <section class="panel">
+            <h2>人员排班</h2>
+            <div id="peopleList" class="resource-list"></div>
+          </section>
+          <section class="panel">
+            <h2>修复设备占用</h2>
+            <div id="devicesList" class="resource-list"></div>
+          </section>
+          <section class="panel">
+            <h2>库存与预留</h2>
+            <div id="inventoryList" class="inventory-list"></div>
+          </section>
+        </div>
       </section>
     </main>
 
+    <!-- ============ 案例详情抽屉 ============ -->
+    <div class="drawer-mask hidden" id="drawerMask"></div>
+    <aside class="drawer hidden" id="caseDrawer" aria-label="事故案例详情">
+      <div class="drawer-head">
+        <div>
+          <span class="case-code" id="drawerCode"></span>
+          <h2 id="drawerTitle"></h2>
+        </div>
+        <button id="drawerClose" title="关闭">×</button>
+      </div>
+      <div class="drawer-body" id="drawerBody"></div>
+    </aside>
+
+    <!-- ============ 合并中心 ============ -->
+    <div class="modal-mask hidden" id="mergeMask">
+      <div class="modal">
+        <div class="modal-head">
+          <h2>离线页面合并 · 逐项裁决</h2>
+          <button id="mergeCancel">×</button>
+        </div>
+        <div class="modal-body" id="mergeBody"></div>
+        <div class="modal-foot">
+          <label class="inline-check">
+            <input id="mergeTakeIncomingAll" type="checkbox" />
+            所有冲突项一律采用离线页的值
+          </label>
+          <button id="mergeCommit" class="primary">按裁决合并</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+
+    <script src="core.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

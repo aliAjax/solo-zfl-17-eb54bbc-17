@@ -18,3 +18,7 @@ pnpm-debug.log*
 
 .vscode/
 .idea/
+
+# playwright
+test-results/
+playwright-report/
